@@ -1,0 +1,495 @@
+<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom" ><generator uri="https://jekyllrb.com/" version="4.2.2">Jekyll</generator><link href="/tekblog/feed.xml" rel="self" type="application/atom+xml" /><link href="/tekblog/" rel="alternate" type="text/html" /><updated>2022-04-16T02:54:12+00:00</updated><id>/tekblog/feed.xml</id><title type="html">Tekblog</title><subtitle>Snippets from the world of IT &amp; Software Engineering</subtitle><entry><title type="html">FreeIPA authentication for non-domain Samba shares</title><link href="/tekblog/2022/04/05/samba-freeipa.html" rel="alternate" type="text/html" title="FreeIPA authentication for non-domain Samba shares" /><published>2022-04-05T00:00:00+00:00</published><updated>2022-04-05T00:00:00+00:00</updated><id>/tekblog/2022/04/05/samba-freeipa</id><content type="html" xml:base="/tekblog/2022/04/05/samba-freeipa.html"><![CDATA[<p><em>Original Source: <a href="https://bgstack15.wordpress.com/2017/05/10/samba-share-with-freeipa-auth/">https://bgstack15.wordpress.com/2017/05/10/samba-share-with-freeipa-auth/</a></em> (<a href="https://web.archive.org/web/20220331111211/https://bgstack15.wordpress.com/2017/05/10/samba-share-with-freeipa-auth/">Archived</a>)</p>
+
+<h1 id="use-freeipa-authentication-for-samba-cifs-shares-for-non-domain-windows-clients">Use FreeIPA Authentication for Samba CIFS Shares for Non-domain Windows Clients</h1>
+
+<p>I couldn’t find a singular place on the Internet for a descriptive guide of how to configure samba to use freeipa authentication for cifs shares for non-domain Windows clients.
+There are guides out there for freeipa cross-domain trust, so you can share with a domain-joined Windows client, including <a href="https://bgstack15.wordpress.com/2017/05/10/samba-share-with-freeipa-auth/">https://www.freeipa.org/page/Howto/Integrating_a_Samba_File_Server_With_IPA</a>.</p>
+
+<p>This document will show you how to set up Samba 4.4.4 to use FreeIPA 4.4.0 usernames and passwords to allow Windows clients to connect to cifs shares.</p>
+
+<h3 id="example-environment">Example environment:</h3>
+
+<ul>
+  <li>Freeipa domain is vm.example.com.</li>
+  <li>A freeipa master on CentOS7 host1.vm.example.com 192.168.100.10</li>
+  <li>A freeipa replica on CentOS7 host2.vm.example.com 192.168.100.11</li>
+  <li>Samba server will go on host2.vm.examplecom.</li>
+  <li>Windows client is horatio.vm.example.com.</li>
+</ul>
+
+<p><strong>update 2020-03-03</strong></p>
+
+<p>With the information shared by Alexander NA below, by changing a few lines in smb.conf, samba 4.9.1 will work with freeipa! You need to comment out these lines:</p>
+
+<div class="language-conf highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c">#domain master = Yes
+#domain logons = Yes
+</span></code></pre></div></div>
+
+<p>I actually filed a bug a while ago in CentOS, but I need to go update it now.
+Samba share with freeipa auth</p>
+
+<h2 id="install-freeipa-server-and-replica">Install freeipa server (and replica)</h2>
+
+<p>You need a working freeipa environment, which is outside the scope of this document. A quick sample installation process is:</p>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c">### INSTALL FREEIPA host1.vm.example.com</span>
+
+firewall-cmd <span class="nt">--permanent</span> <span class="nt">--add-service</span><span class="o">=</span>freeipa-ldap <span class="nt">--add-service</span><span class="o">=</span>freeipa-ldaps <span class="nt">--add-service</span><span class="o">=</span>ntp <span class="nt">--add-service</span><span class="o">=</span>dns <span class="nt">--add-service</span><span class="o">=</span>dhcp <span class="nt">--add-service</span><span class="o">=</span>kerberos
+firewall-cmd <span class="nt">--reload</span>
+
+yum <span class="nb">install</span> <span class="nt">-y</span> ipa-server ipa-client
+ipa-server-install <span class="nt">-r</span> VM.EXAMPLE.COM <span class="nt">-n</span> vm.example.com <span class="nt">--mkhomedir</span> <span class="nt">--hostname</span><span class="o">=</span><span class="s2">"</span><span class="si">$(</span> <span class="nb">hostname</span> <span class="nt">--fqdn</span> <span class="si">)</span><span class="s2">"</span> <span class="nt">--admin-password</span><span class="o">=</span><span class="s1">'adminpassword'</span> <span class="nt">--ds-password</span><span class="o">=</span><span class="s1">'dspassword'</span>
+</code></pre></div></div>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c">### INSTALL REPLICA host2.vm.example.com</span>
+
+firewall-cmd <span class="nt">--permanent</span> <span class="nt">--add-service</span><span class="o">=</span>freeipa-ldap <span class="nt">--add-service</span><span class="o">=</span>freeipa-ldaps <span class="nt">--add-service</span><span class="o">=</span>ntp <span class="nt">--add-service</span><span class="o">=</span>dns <span class="nt">--add-service</span><span class="o">=</span>dhcp <span class="nt">--add-service</span><span class="o">=</span>kerberos
+firewall-cmd <span class="nt">--reload</span>
+
+yum <span class="nb">install</span> <span class="nt">-y</span> ipa-server ipa-client
+ipa-client-install <span class="nt">--mkhomedir</span> <span class="nt">--force-ntpd</span> <span class="nt">--enable-dns-updates</span>
+ipa-replica-install <span class="nt">--setup-ca</span> <span class="nt">--mkhomedir</span>
+</code></pre></div></div>
+
+<h2 id="install-samba-server">Install samba server</h2>
+
+<p>Install the samba packages.</p>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code>yum <span class="nt">-y</span> <span class="nb">install </span>samba samba-client sssd-libwbclient
+</code></pre></div></div>
+
+<p>Create the cifs principal for samba on one of the ipa controllers.</p>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># run on an ipa controller. This principal name is "service/hostname"</span>
+ipa service-add cifs/host2.vm.example.com
+</code></pre></div></div>
+
+<p>Fetch the keytab to the samba server. In this example, it’s the same as the replica.</p>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># on samba server</span>
+kinit <span class="nt">-kt</span> /etc/krb5.keytab
+ipa-getkeytab <span class="nt">-s</span> host1.vm.example.com <span class="nt">-p</span> cifs/host2.vm.example.com <span class="nt">-k</span> /etc/samba/samba.keytab
+
+setsebool <span class="nt">-P</span> samba_enable_home_dirs on &amp;
+</code></pre></div></div>
+
+<p>Reference: <a href="https://bgstack15.wordpress.com/2017/05/10/samba-share-with-freeipa-auth/">https://www.freeipa.org/page/Howto/Integrating_a_Samba_File_Server_With_IPA</a></p>
+
+<h2 id="install-adtrust-components">Install adtrust components</h2>
+
+<h3 id="on-the-freeipa-controller">On the freeipa controller</h3>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code>yum <span class="nt">-y</span> <span class="nb">install </span>ipa-server-trust-ad
+ipa-adtrust-install <span class="nt">--add-sids</span>
+</code></pre></div></div>
+
+<p>I recommend running this interactively, as shown above. Let it overwrite your samba config. It will configure it to use the registry, and we will rewrite it to suit the demands here.
+The ipa-adtrust-install command generates the records you need to add to dns. They will look like:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>Add the following service records to your DNS server for DNS zone vm.example.com: 
+_ldap._tcp.Default-First-Site-Name._sites.dc._msdcs.vm.example.com. 86400 IN SRV 0 100 389 host2.vm.example.com.
+_kerberos._udp.dc._msdcs.vm.example.com. 86400 IN SRV 0 100 88 host2.vm.example.com.
+_kerberos._udp.Default-First-Site-Name._sites.dc._msdcs.vm.example.com. 86400 IN SRV 0 100 88 host2.vm.example.com.
+_ldap._tcp.dc._msdcs.vm.example.com. 86400 IN SRV 0 100 389 host2.vm.example.com.
+_kerberos._tcp.dc._msdcs.vm.example.com. 86400 IN SRV 0 100 88 host2.vm.example.com.
+_kerberos._tcp.Default-First-Site-Name._sites.dc._msdcs.vm.example.com. 86400 IN SRV 0 100 88 host2.vm.example.com.
+</code></pre></div></div>
+
+<p>I successfully added them just fine by pasting them into my zone file and running <code class="language-plaintext highlighter-rouge">rndc reconfig</code> or <code class="language-plaintext highlighter-rouge">systemctl restart named</code>.
+The adtrust mechanism adds new attributes to each user and group, specifically ipaNTSecurityIdentifier (the SID) and ipaNTHash. Technically the ipaNTHash can only be generated when the user changes passwords.</p>
+
+<p>Reference: <a href="https://bgstack15.wordpress.com/2017/05/10/samba-share-with-freeipa-auth/">https://www.redhat.com/archives/freeipa-users/2015-September/msg00052.html</a></p>
+
+<h3 id="on-the-samba-server">On the samba server</h3>
+
+<p>Install the <code class="language-plaintext highlighter-rouge">ipa-server-trust-ad</code> package on the samba server. You need this package there to get the ipasam config option in smb.conf.</p>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code>yum <span class="nt">-y</span> <span class="nb">install </span>ipa-server-trust-ad
+</code></pre></div></div>
+
+<p>Open the firewall for the ports mentioned in the output of the command. You can use this script.</p>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="nv">tf</span><span class="o">=</span>/lib/firewalld/services/freeipa-samba.xml
+<span class="nb">touch</span> <span class="s2">"</span><span class="k">${</span><span class="nv">tf</span><span class="k">}</span><span class="s2">"</span><span class="p">;</span> <span class="nb">chmod </span>0644 <span class="s2">"</span><span class="k">${</span><span class="nv">tf</span><span class="k">}</span><span class="s2">"</span><span class="p">;</span> <span class="nb">chown </span>root:root <span class="s2">"</span><span class="k">${</span><span class="nv">tf</span><span class="k">}</span><span class="s2">"</span><span class="p">;</span> restorecon <span class="s2">"</span><span class="k">${</span><span class="nv">tf</span><span class="k">}</span><span class="s2">"</span>
+<span class="nb">cat</span> <span class="o">&lt;&lt;</span><span class="no">EOFXML</span><span class="sh"> &gt; "</span><span class="k">${</span><span class="nv">tf</span><span class="k">}</span><span class="sh">"
+&lt;?xml version="1.0" encoding="utf-8"?&gt;
+ &lt;service&gt;
+  &lt;short&gt;IPA and Samba&lt;/short&gt;
+  &lt;description&gt;This service provides the ports required by the ipa-adtrust-install command.&lt;/description&gt;
+  &lt;port protocol="tcp" port="135"/&gt;
+  &lt;port protocol="tcp" port="138"/&gt;
+  &lt;port protocol="tcp" port="139"/&gt;
+  &lt;port protocol="tcp" port="445"/&gt;
+  &lt;port protocol="tcp" port="1024-1300"/&gt;
+  &lt;port protocol="udp" port="138"/&gt;
+  &lt;port protocol="udp" port="139"/&gt;
+  &lt;port protocol="udp" port="389"/&gt;
+  &lt;port protocol="udp" port="445"/&gt;
+ &lt;/service&gt;
+</span><span class="no">EOFXML
+</span>systemctl restart firewalld
+firewall-cmd <span class="nt">--permanent</span> <span class="nt">--add-service</span><span class="o">=</span>freeipa-samba
+firewall-cmd <span class="nt">--reload</span>
+<span class="nb">echo </span><span class="k">done</span>
+</code></pre></div></div>
+
+<h2 id="allow-samba-to-read-passwords">Allow samba to read passwords</h2>
+
+<p>This is the magic part that is so hard to find on the Internet.
+You will need to give special permissions to the samba service to read user passwords.</p>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code>ipa permission-add <span class="s2">"CIFS server can read user passwords"</span> <span class="se">\</span>
+   <span class="nt">--attrs</span><span class="o">={</span>ipaNTHash,ipaNTSecurityIdentifier<span class="o">}</span> <span class="se">\</span>
+   <span class="nt">--type</span><span class="o">=</span>user <span class="nt">--right</span><span class="o">={</span><span class="nb">read</span>,search,compare<span class="o">}</span> <span class="nt">--bindtype</span><span class="o">=</span>permission
+ipa privilege-add <span class="s2">"CIFS server privilege"</span>
+ipa privilege-add-permission <span class="s2">"CIFS server privilege"</span> <span class="se">\</span>
+   <span class="nt">--permission</span><span class="o">=</span><span class="s2">"CIFS server can read user passwords"</span>
+ipa role-add <span class="s2">"CIFS server"</span>
+ipa role-add-privilege <span class="s2">"CIFS server"</span> <span class="nt">--privilege</span><span class="o">=</span><span class="s2">"CIFS server privilege"</span>
+ipa role-add-member <span class="s2">"CIFS server"</span> <span class="nt">--services</span><span class="o">=</span>cifs/host2.vm.example.com
+</code></pre></div></div>
+
+<p>Reference: <a href="https://bgstack15.wordpress.com/2017/05/10/samba-share-with-freeipa-auth/">http://freeipa-users.redhat.narkive.com/ez2uKpFS/authenticate-samba-3-or-4-with-freeipa</a></p>
+
+<h3 id="explanation">Explanation</h3>
+
+<p>If you use ldapsearch with kerberos authentication (after a kinit admin, of course), you can see attributes about users.</p>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code>ldapsearch <span class="nt">-Y</span> gssapi <span class="s2">"(uid=username)"</span>
+</code></pre></div></div>
+
+<p>Even if the user has generated a new password since the adtrust installation, even the admin cannot see the ipaNTHash attribute.
+To confirm the samba service can read the ipaNTHash, use its keytab and search for that attribute.</p>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># on the samba server, so host2.vm.example.com</span>
+kdestroy <span class="nt">-A</span>
+kinit <span class="nt">-kt</span> /etc/samba/samba.keytab cifs/host2.vm.example.com
+ldapsearch <span class="nt">-Y</span> gssapi <span class="s2">"(ipaNTHash=*)"</span> ipaNTHash
+</code></pre></div></div>
+
+<h2 id="configure-samba-to-use-freeipa-auth">Configure samba to use freeipa auth</h2>
+
+<p>When freeipa adjusts the samba config, it will just make it use the registry backend. You can view the equivalent conf file with <code class="language-plaintext highlighter-rouge">testparm</code>.
+Here is a complete /etc/samba/smb.conf:</p>
+
+<div class="language-conf highlighter-rouge"><div class="highlight"><pre class="highlight"><code>[<span class="n">global</span>]
+	<span class="n">debug</span> <span class="n">pid</span> = <span class="n">yes</span>
+	<span class="n">realm</span> = <span class="n">VM</span>.<span class="n">EXAMPLE</span>.<span class="n">COM</span>
+	<span class="n">workgroup</span> = <span class="n">VM</span>
+	<span class="c">#domain master = Yes
+</span>	<span class="n">ldap</span> <span class="n">group</span> <span class="n">suffix</span> = <span class="n">cn</span>=<span class="n">groups</span>,<span class="n">cn</span>=<span class="n">accounts</span>
+	<span class="n">ldap</span> <span class="n">machine</span> <span class="n">suffix</span> = <span class="n">cn</span>=<span class="n">computers</span>,<span class="n">cn</span>=<span class="n">accounts</span>
+	<span class="n">ldap</span> <span class="n">ssl</span> = <span class="n">off</span>
+	<span class="n">ldap</span> <span class="n">suffix</span> = <span class="n">dc</span>=<span class="n">vm</span>,<span class="n">dc</span>=<span class="n">example</span>,<span class="n">dc</span>=<span class="n">com</span>
+	<span class="n">ldap</span> <span class="n">user</span> <span class="n">suffix</span> = <span class="n">cn</span>=<span class="n">users</span>,<span class="n">cn</span>=<span class="n">accounts</span>
+	<span class="n">log</span> <span class="n">file</span> = /<span class="n">var</span>/<span class="n">log</span>/<span class="n">samba</span>/<span class="n">log</span>
+	<span class="n">max</span> <span class="n">log</span> <span class="n">size</span> = <span class="m">100000</span>
+	<span class="c">#domain logons = Yes
+</span>	<span class="n">registry</span> <span class="n">shares</span> = <span class="n">Yes</span>
+	<span class="n">disable</span> <span class="n">spoolss</span> = <span class="n">Yes</span>
+	<span class="n">dedicated</span> <span class="n">keytab</span> <span class="n">file</span> = <span class="n">FILE</span>:/<span class="n">etc</span>/<span class="n">samba</span>/<span class="n">samba</span>.<span class="n">keytab</span>
+	<span class="n">kerberos</span> <span class="n">method</span> = <span class="n">dedicated</span> <span class="n">keytab</span>
+	<span class="c">#passdb backend = ipasam:ldapi://%2fvar%2frun%2fslapd-VM-EXAMPLE-COM.socket
+</span>	<span class="c">#passdb backend = ldapsam:ldapi://%2fvar%2frun%2fslapd-VM-EXAMPLE-COM.socket
+</span>	<span class="n">passdb</span> <span class="n">backend</span> = <span class="n">ipasam</span>:<span class="n">ldap</span>://<span class="n">host2</span>.<span class="n">vm</span>.<span class="n">example</span>.<span class="n">com</span> <span class="n">ldap</span>://<span class="n">host1</span>.<span class="n">vm</span>.<span class="n">example</span>.<span class="n">com</span>
+	<span class="n">security</span> = <span class="n">USER</span>
+	<span class="n">create</span> <span class="n">krb5</span> <span class="n">conf</span> = <span class="n">No</span>
+	<span class="n">rpc_daemon</span>:<span class="n">lsasd</span> = <span class="n">fork</span>
+	<span class="n">rpc_daemon</span>:<span class="n">epmd</span> = <span class="n">fork</span>
+	<span class="n">rpc_server</span>:<span class="n">tcpip</span> = <span class="n">yes</span>
+	<span class="n">rpc_server</span>:<span class="n">netlogon</span> = <span class="n">external</span>
+	<span class="n">rpc_server</span>:<span class="n">samr</span> = <span class="n">external</span>
+	<span class="n">rpc_server</span>:<span class="n">lsasd</span> = <span class="n">external</span>
+	<span class="n">rpc_server</span>:<span class="n">lsass</span> = <span class="n">external</span>
+	<span class="n">rpc_server</span>:<span class="n">lsarpc</span> = <span class="n">external</span>
+	<span class="n">rpc_server</span>:<span class="n">epmapper</span> = <span class="n">external</span>
+	<span class="n">ldapsam</span>:<span class="n">trusted</span> = <span class="n">yes</span>
+	<span class="n">idmap</span> <span class="n">config</span> * : <span class="n">backend</span> = <span class="n">tdb</span>
+
+	<span class="n">ldap</span> <span class="n">admin</span> <span class="n">dn</span> = <span class="n">cn</span>=<span class="n">Directory</span> <span class="n">Manager</span>
+
+[<span class="n">homes</span>]
+	<span class="n">comment</span> = <span class="n">Home</span> <span class="n">Directories</span>
+	<span class="n">valid</span> <span class="n">users</span> = %<span class="n">S</span>, %<span class="n">D</span>%<span class="n">w</span>%<span class="n">S</span>
+	<span class="n">browseable</span> = <span class="n">No</span>
+	<span class="n">read</span> <span class="n">only</span> = <span class="n">No</span>
+	<span class="n">inherit</span> <span class="n">acls</span> = <span class="n">Yes</span>
+</code></pre></div></div>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="nb">chmod </span>0644 /etc/samba/smb.conf
+<span class="nb">chown </span>root:root /etc/samba/smb.conf
+restorecon /etc/samba/smb.conf
+systemctl restart smb.service
+</code></pre></div></div>
+
+<h2 id="appendices">Appendices</h2>
+
+<h3 id="get-localsid">Get localsid</h3>
+
+<p>Get the local SID</p>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code>net getlocalsid
+</code></pre></div></div>
+
+<h3 id="changing-ipa-domains">Changing ipa domains</h3>
+
+<p>It’s possible that if you change ipa domains, the sssd cache is not cleared and you will have cached information for the old domain which can prevent user authentication from happening. You can just clear the cache directory manually and restart sssd.</p>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="nb">rm</span> <span class="nt">-rf</span> /var/lib/sss/db/<span class="k">*</span>
+systemctl restart sssd.service
+</code></pre></div></div>
+
+<p>Reference: <a href="https://bgstack15.wordpress.com/2017/05/10/samba-share-with-freeipa-auth/">https://bgstack15.wordpress.com/2017/05/07/freeipa-client-uninstall-and-reinstall/</a></p>
+
+<h2 id="references">References</h2>
+
+<ol>
+  <li>
+    <p>install samba and kerberize it:
+<a href="https://sites.google.com/site/wikirolanddelepper/directory-services/ipa-server-with-samba">https://sites.google.com/site/wikirolanddelepper/directory-services/ipa-server-with-samba</a></p>
+  </li>
+  <li>
+    <p>add cifs/servername entry:
+<a href="https://www.freeipa.org/page/Howto/Integrating_a_Samba_File_Server_With_IPA">https://www.freeipa.org/page/Howto/Integrating_a_Samba_File_Server_With_IPA</a></p>
+  </li>
+  <li>
+    <p>cifs service needs custom privilege to read password:
+<a href="http://freeipa-users.redhat.narkive.com/ez2uKpFS/authenticate-samba-3-or-4-with-freeipa">http://freeipa-users.redhat.narkive.com/ez2uKpFS/authenticate-samba-3-or-4-with-freeipa</a></p>
+  </li>
+  <li>
+    <p>Each user must generate a new password:
+<a href="https://www.redhat.com/archives/freeipa-users/2015-September/msg00052.html">https://www.redhat.com/archives/freeipa-users/2015-September/msg00052.html</a></p>
+  </li>
+  <li>
+    <p>Seminal article about freeipa and samba integration:
+<a href="https://techslaves.org/2011/08/24/freeipa-and-samba-3-integration/">https://techslaves.org/2011/08/24/freeipa-and-samba-3-integration/</a></p>
+  </li>
+  <li>
+    <p>Changing ipa domains:
+<a href="https://bgstack15.wordpress.com/2017/05/07/freeipa-client-uninstall-and-reinstall/">https://bgstack15.wordpress.com/2017/05/07/freeipa-client-uninstall-and-reinstall/</a></p>
+  </li>
+</ol>]]></content><author><name></name></author><category term="sysadmin" /><category term="samba" /><category term="freeipa" /><summary type="html"><![CDATA[Original Source: https://bgstack15.wordpress.com/2017/05/10/samba-share-with-freeipa-auth/ (Archived)]]></summary></entry><entry><title type="html">Fix terminal printing weird characters when using the mouse</title><link href="/tekblog/2022/01/05/terminal-issues.html" rel="alternate" type="text/html" title="Fix terminal printing weird characters when using the mouse" /><published>2022-01-05T00:00:00+00:00</published><updated>2022-01-05T00:00:00+00:00</updated><id>/tekblog/2022/01/05/terminal-issues</id><content type="html" xml:base="/tekblog/2022/01/05/terminal-issues.html"><![CDATA[<p>My terminal prints weird characters when clicking or using the scroll wheel!</p>
+
+<p>Some applications such as <code class="language-plaintext highlighter-rouge">vim</code> and <code class="language-plaintext highlighter-rouge">tmux</code> use <em>cursor addressing mode</em>.
+Usually this mode will be reset once the program exits, but if a crash or unexpected disconnect occurs, then it may not be reset properly.</p>
+
+<p>To reset it manually, either open and close <code class="language-plaintext highlighter-rouge">vim</code>, or execute:</p>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code>tput rmcup
+</code></pre></div></div>
+
+<p>Source: <a href="https://www.igorkromin.net/index.php/2016/05/05/mouse-wheel-displaying-control-characters-in-a-terminal-or-scrolling-through-history-instead">https://www.igorkromin.net/index.php/2016/05/05/mouse-wheel-displaying-control-characters-in-a-terminal-or-scrolling-through-history-instead</a>
+(<a href="https://web.archive.org/web/20210517040931/https://www.igorkromin.net/index.php/2016/05/05/mouse-wheel-displaying-control-characters-in-a-terminal-or-scrolling-through-history-instead/">Archive</a>)</p>]]></content><author><name></name></author><category term="sysadmin" /><category term="workarounds" /><summary type="html"><![CDATA[My terminal prints weird characters when clicking or using the scroll wheel!]]></summary></entry><entry><title type="html">Add environment to jupyter notebook</title><link href="/tekblog/2021/09/30/jupyter-notebook-add-env.html" rel="alternate" type="text/html" title="Add environment to jupyter notebook" /><published>2021-09-30T00:00:00+00:00</published><updated>2021-09-30T00:00:00+00:00</updated><id>/tekblog/2021/09/30/jupyter-notebook-add-env</id><content type="html" xml:base="/tekblog/2021/09/30/jupyter-notebook-add-env.html"><![CDATA[<p>From within a python environment that you want to add:</p>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code>pip <span class="nb">install </span>ipykernel
+python <span class="nt">-m</span> ipykernel <span class="nb">install</span> <span class="nt">--user</span> <span class="nt">--name</span> <span class="s1">'my-env'</span> <span class="nt">--display-name</span> <span class="s1">'Python 3.x (My Env)'</span>
+</code></pre></div></div>]]></content><author><name></name></author><category term="development" /><category term="ipython" /><summary type="html"><![CDATA[From within a python environment that you want to add:]]></summary></entry><entry><title type="html">Installing autojump</title><link href="/tekblog/2021/07/18/install-autojump.html" rel="alternate" type="text/html" title="Installing autojump" /><published>2021-07-18T00:00:00+00:00</published><updated>2021-07-18T00:00:00+00:00</updated><id>/tekblog/2021/07/18/install-autojump</id><content type="html" xml:base="/tekblog/2021/07/18/install-autojump.html"><![CDATA[<h3 id="1-install">1. Install</h3>
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code>git clone git://github.com/wting/autojump.git
+<span class="nb">cd </span>autojump
+<span class="nb">sudo</span> ./install.py <span class="nt">--prefix</span> /usr/local <span class="nt">--destdir</span> /usr/local <span class="nt">--zshshare</span> /usr/local/share/zsh/site-functions
+</code></pre></div></div>
+
+<h3 id="2-update-zshrc">2. Update <code class="language-plaintext highlighter-rouge">~/.zshrc</code></h3>
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">if</span> <span class="o">[</span> <span class="nt">-e</span> /usr/local/share/autojump/autojump.zsh <span class="o">]</span><span class="p">;</span> <span class="k">then
+    </span><span class="nb">source</span> /usr/local/share/autojump/autojump.zsh
+<span class="k">fi</span>
+</code></pre></div></div>]]></content><author><name></name></author><category term="sysadmin" /><summary type="html"><![CDATA[1. Install git clone git://github.com/wting/autojump.git cd autojump sudo ./install.py --prefix /usr/local --destdir /usr/local --zshshare /usr/local/share/zsh/site-functions]]></summary></entry><entry><title type="html">Replacing a snapraid disk</title><link href="/tekblog/2021/07/18/snapraid-replace-disk.html" rel="alternate" type="text/html" title="Replacing a snapraid disk" /><published>2021-07-18T00:00:00+00:00</published><updated>2021-07-18T00:00:00+00:00</updated><id>/tekblog/2021/07/18/snapraid-replace-disk</id><content type="html" xml:base="/tekblog/2021/07/18/snapraid-replace-disk.html"><![CDATA[<h2 id="replace-a-working-disk">Replace a working disk</h2>
+
+<ul>
+  <li>Old disk: <code class="language-plaintext highlighter-rouge">/dev/sdx</code> mounted at /media/disk/data-07 (SnapRaid data d7)</li>
+  <li>New Disk: <code class="language-plaintext highlighter-rouge">/dev/sdy</code></li>
+</ul>
+
+<h1 id="1-create-partition">1. Create partition</h1>
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code>parted <span class="nt">--script</span> /dev/sdy <span class="nt">--</span> <span class="se">\</span>
+    mklabel gpt <span class="se">\</span>
+    mkpart primary 1 <span class="nt">-1</span> <span class="se">\</span>
+    align-check optimal 1 <span class="se">\</span>
+    print
+</code></pre></div></div>
+
+<h1 id="2-format">2. Format</h1>
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code>mkfs.ext4 <span class="nt">-m</span> 2 <span class="nt">-T</span> largefile /dev/sdy1
+</code></pre></div></div>
+
+<p>Explanation of options:</p>
+
+<ul>
+  <li><code class="language-plaintext highlighter-rouge">-m 2</code>           Reserve 2% free space</li>
+  <li><code class="language-plaintext highlighter-rouge">-T largefile</code>   make 1 inode per 1MB</li>
+  <li><code class="language-plaintext highlighter-rouge">-T largefile4</code>  make 1 inode per 4MB</li>
+</ul>
+
+<h1 id="3-mount-and-copy-data">3. Mount and copy data</h1>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code>mount /dev/sdy1 /mnt
+rsync <span class="nt">-vPaHAX</span> /media/disk/data-07/ /mnt/
+umount /mnt
+</code></pre></div></div>
+
+<h1 id="4-update-fstab">4. Update fstab</h1>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Disable snapraid</span>
+crontab <span class="nt">-e</span>
+
+<span class="c"># Unmount old drive</span>
+umount /media/disk/data-07
+
+<span class="c"># Get UUID or new partition</span>
+blkid /dev/sdy1
+
+<span class="c"># Update fstab</span>
+vim /etc/fstab
+<span class="c"># - UUID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx /media/disk/data-07  ext4 defaults,nofail,x-systemd.device-timeout=10s 0 0</span>
+<span class="c"># + UUID=yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy /media/disk/data-07  ext4 defaults,nofail,x-systemd.device-timeout=10s 0 0</span>
+
+<span class="c"># Mount new drive</span>
+systemctl daemon-reload
+systemctl restart local-fs.target
+
+</code></pre></div></div>
+
+<h2 id="5-update-snapraid--mergerfs">5. Update SnapRAID / MergerFS</h2>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Check for differences between new disk and what SnapRAID expects</span>
+snapraid diff
+
+<span class="c"># Check the data was copied OK</span>
+snapraid check <span class="nt">-a</span> <span class="nt">-d</span> d7
+
+<span class="c"># Sync, should be fast</span>
+snapraid <span class="nb">sync</span>
+
+<span class="c"># Check MergerFS has the disk mounted</span>
+mergerfs.ctl info
+
+<span class="c"># If not, then add it</span>
+mergerfs.ctl add /media/disk/data-07
+
+<span class="c"># Re-enable snapraid</span>
+crontab <span class="nt">-e</span>
+
+</code></pre></div></div>]]></content><author><name></name></author><category term="sysadmin" /><category term="storage" /><category term="snapraid" /><summary type="html"><![CDATA[Replace a working disk]]></summary></entry><entry><title type="html">tinyMediaManager configuration</title><link href="/tekblog/2021/03/08/tmm-configuration.html" rel="alternate" type="text/html" title="tinyMediaManager configuration" /><published>2021-03-08T00:00:00+00:00</published><updated>2021-03-08T00:00:00+00:00</updated><id>/tekblog/2021/03/08/tmm-configuration</id><content type="html" xml:base="/tekblog/2021/03/08/tmm-configuration.html"><![CDATA[<h2 id="movie-rename-format">Movie Rename format:</h2>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>${title} ${- ,edition,} (${year}) ${(,mediaSource,) }[${videoCodec} ${videoFormat}${if movie.mediaInfoVideoFormat = "2160p"}${ ,hdr,}${end}, ${audioCodec} ${audioChannels}]
+
+${title} ${- ,edition,} (${year}) ${(,mediaSource,) }[${videoCodec} ${videoFormat}${if movie.mediaInfoVideoFormat = "2160p"}${if movie.mediaInfoVideoBitDepth = "10"}${ ,videoBitDepth,}bit${ ,hdr,}${end}${end}, ${audioCodec} ${audioChannels}]
+</code></pre></div></div>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>$set(year,$if2(%originalyear%,%year%))
+$set(mediaType,
+$if($eq(%media%,Digital Media),Digital,
+$if($eq(%media%,12" Vinyl),12in Vinyl,
+$if($eq(%media%,7" Vinyl),7in Vinyl,
+$if($eq(%media%,Enhanced CD),ECD,
+$if($eq(%media%,DVD-Video),DVD,
+%media%
+))))))
+
+$set(discsubtitle,$if2(
+$if($startswith(%discsubtitle%,Outtakes and Previously Unreleased Music From: Star Wars),
+	Outtakes and Unreleased
+),
+%discsubtitle%
+))
+
+$set(_primaryreleasetype,
+$if($eq(%_primaryreleasetype%,ep),EP,
+$title(%_primaryreleasetype%))/
+/)
+
+$set(releaseType,$title(%_primaryreleasetype%)/)
+$set(mediaType,$if(%mediaType%,$lower(%mediaType%)))
+
+$set(catalogNumber,$if(%catalognumber%,$if($eq(%catalognumber%,[none]),,%catalognumber%)))
+
+
+$set(releaseDetail,[%mediaType%\,%releasetype%] [%releasecountry%$if(%catalogNumber%,\,%catalogNumber%)])
+
+$set(isMultiDisc,$gt(%totaldiscs%,1))
+
+$set(discName,
+$if($rsearch(%discsubtitle%,^Disc \\d),%discsubtitle%,
+$if(%discsubtitle%,Disc %discnumber% - %discsubtitle%,
+Disc %discnumber%
+)))
+
+$set(discFolder,$if(%isMultiDisc%,%discName%))
+$set(trackNum,$if(%isMultiDisc%,%discnumber%-,)$if($ne(%albumartist%,),$num(%tracknumber%,2),))
+$set(trackartist,$if(%_multiartist%,%artist%))
+
+$set(albumFolder,%year%. %album% %releaseDetail% )
+$set(albumartist,$if2(%albumartist%,%artist%))
+
+$set(isSoundtrack,$in(%releasetype%,soundtrack))
+$set(soundtrackFolder,%album%$if(%year%, \(%year%\)))
+
+$if(%isSoundtrack%,
+	Soundtracks/%soundtrackFolder%/%discFolder%/%trackNum% %artist% - %title%,
+	%albumartist%/%releaseType%/%albumFolder%/%discFolder%/%trackNum% $if(%trackartist%,%trackartist% - )%title%
+)
+</code></pre></div></div>]]></content><author><name></name></author><category term="media" /><category term="configuration" /><summary type="html"><![CDATA[Movie Rename format:]]></summary></entry><entry><title type="html">Remove nagscreen from Proxmox</title><link href="/tekblog/2021/02/16/proxmox-nagscreen.html" rel="alternate" type="text/html" title="Remove nagscreen from Proxmox" /><published>2021-02-16T00:00:00+00:00</published><updated>2021-02-16T00:00:00+00:00</updated><id>/tekblog/2021/02/16/proxmox-nagscreen</id><content type="html" xml:base="/tekblog/2021/02/16/proxmox-nagscreen.html"><![CDATA[<p>Trying to run a homelab on the cheap, and keep getting reminded of your cheapness?</p>
+
+<p><img src="/assets/img/proxmox-nagscreen.png" alt="Proxmox nag screen" width="500px" /></p>
+
+<p>Disable checked commands:</p>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c">#!/bin/sh</span>
+
+<span class="nv">PROXMOXLIB_JS</span><span class="o">=</span>/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js
+
+<span class="nv">PATCH_COMMENT</span><span class="o">=</span><span class="s2">"// NO_CHECKED_COMMAND_PATCH"</span>
+
+<span class="k">if </span><span class="nb">grep</span> <span class="nt">-q</span> <span class="s2">"</span><span class="nv">$PATCH_COMMENT</span><span class="s2">"</span> <span class="s2">"</span><span class="nv">$PROXMOXLIB_JS</span><span class="s2">"</span><span class="p">;</span> <span class="k">then
+        </span><span class="nb">echo</span> <span class="s1">'Already patched!'</span>
+        <span class="nb">exit </span>0
+<span class="k">fi
+
+</span><span class="nb">set</span> <span class="nt">-x</span>
+<span class="nb">sed</span> <span class="nt">-i</span> <span class="s1">'s,\(checked_command: function(\([^,]*\).*) {\),\1\n\t\2(); return; '</span><span class="s2">"</span><span class="nv">$PATCH_COMMENT</span><span class="s2">,"</span> <span class="s2">"</span><span class="nv">$PROXMOXLIB_JS</span><span class="s2">"</span>
+</code></pre></div></div>]]></content><author><name></name></author><category term="virtual-machines" /><category term="proxmox" /><category term="sysadmin" /><summary type="html"><![CDATA[Trying to run a homelab on the cheap, and keep getting reminded of your cheapness?]]></summary></entry><entry><title type="html">Syntax for visudo</title><link href="/tekblog/2021/01/18/sudoers-syntax.html" rel="alternate" type="text/html" title="Syntax for visudo" /><published>2021-01-18T00:00:00+00:00</published><updated>2021-01-18T00:00:00+00:00</updated><id>/tekblog/2021/01/18/sudoers-syntax</id><content type="html" xml:base="/tekblog/2021/01/18/sudoers-syntax.html"><![CDATA[<h3 id="nopasswd-syntax">NOPASSWD Syntax</h3>
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>user ALL=(ALL) NOPASSWD:/usr/bin/apt update, /usr/bin/apt upgrade
+</code></pre></div></div>
+
+<h3 id="options">Options</h3>
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>Defaults    insults     # Insult me
+</code></pre></div></div>]]></content><author><name></name></author><category term="sysadmin" /><category term="configuration" /><summary type="html"><![CDATA[NOPASSWD Syntax user ALL=(ALL) NOPASSWD:/usr/bin/apt update, /usr/bin/apt upgrade]]></summary></entry><entry><title type="html">Remuxing with mkvtoolnix</title><link href="/tekblog/2020/08/03/remuxing-with-mkvtooknix.html" rel="alternate" type="text/html" title="Remuxing with mkvtoolnix" /><published>2020-08-03T00:00:00+00:00</published><updated>2020-08-03T00:00:00+00:00</updated><id>/tekblog/2020/08/03/remuxing-with-mkvtooknix</id><content type="html" xml:base="/tekblog/2020/08/03/remuxing-with-mkvtooknix.html"><![CDATA[<h3 id="view-track-information">View track information</h3>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code>mkvinfo input.mkv
+</code></pre></div></div>
+
+<h3 id="mux-separate-tracks-into-an-mkv-container">Mux separate tracks into an MKV container</h3>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code>mkvmerge video.mp4 audio.ac3 audio.mp3 subtitle.srt <span class="nt">-o</span> output.mkv
+</code></pre></div></div>
+
+<h3 id="set-track-information">Set track information</h3>
+
+<ul>
+  <li>List all property names with <code class="language-plaintext highlighter-rouge">mkvpropedit -l</code></li>
+  <li>Language property supports <a href="https://en.wikipedia.org/wiki/List_of_ISO_639-2_codes">ISO 639-2 Codes</a></li>
+</ul>
+
+<p><em>Update Subtitle (language / default / forced flags) and Audio (language) flags:</em></p>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code>mkvpropedit movie.mkv <span class="se">\</span>
+    <span class="nt">--edit</span> track:a1 <span class="nt">--set</span> <span class="nv">language</span><span class="o">=</span>eng <span class="se">\</span>
+    <span class="nt">--edit</span> track:a2 <span class="nt">--set</span> <span class="nv">language</span><span class="o">=</span>spa <span class="se">\</span>
+    <span class="nt">--edit</span> track:s1 <span class="nt">--set</span> <span class="nv">language</span><span class="o">=</span>eng <span class="nt">--set</span> flag-default<span class="o">=</span>1 <span class="nt">--set</span> name <span class="s2">"English"</span> <span class="se">\</span>
+    <span class="nt">--edit</span> track:s2 <span class="nt">--set</span> <span class="nv">language</span><span class="o">=</span>eng <span class="nt">--set</span> flag-default<span class="o">=</span>0 <span class="nt">--set</span> name <span class="s2">"English (Forced)"</span> <span class="nt">--set</span> flag-forced<span class="o">=</span>1 <span class="se">\</span>
+    <span class="nt">--edit</span> track:s3 <span class="nt">--set</span> <span class="nv">language</span><span class="o">=</span>jpn <span class="nt">--set</span> flag-default<span class="o">=</span>0 <span class="nt">--set</span> name <span class="s2">"Japanese"</span>
+</code></pre></div></div>]]></content><author><name></name></author><category term="video" /><category term="media" /><category term="mkv" /><summary type="html"><![CDATA[View track information]]></summary></entry><entry><title type="html">Using QEMU Virtual Machine Manager</title><link href="/tekblog/2020/07/31/virt-viewer.html" rel="alternate" type="text/html" title="Using QEMU Virtual Machine Manager" /><published>2020-07-31T00:00:00+00:00</published><updated>2020-07-31T00:00:00+00:00</updated><id>/tekblog/2020/07/31/virt-viewer</id><content type="html" xml:base="/tekblog/2020/07/31/virt-viewer.html"><![CDATA[<h3 id="connecting-a-vm-using-virt-viewer">Connecting a VM using virt-viewer</h3>
+
+<p>QEMU virtual machines running on a remote host can be connected to directly:</p>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code>virt-viewer <span class="nt">--connect</span> qemu+ssh://<span class="nv">$USER</span>@<span class="nv">$HOST</span>:<span class="nv">$PORT</span>/system <span class="nv">$VM_NAME</span>
+</code></pre></div></div>
+
+<h3 id="connecting-virt-manager-to-a-remote-qemu-i">Connecting virt-manager to a remote QEMU i</h3>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code>virt-manager <span class="nt">-c</span> <span class="s2">"qemu+ssh://</span><span class="nv">$USER</span><span class="s2">@</span><span class="nv">$HOST</span><span class="s2">:</span><span class="nv">$PORT</span><span class="s2">/system?keyfile=</span><span class="nv">$SSH_PRIVATE_KEY</span><span class="s2">"</span>
+</code></pre></div></div>
+
+<h2 id="links">Links</h2>
+
+<p><a href="https://libvirt.org/uri.html">libvirt: Connection URIs</a> – <em>https://libvirt.org/uri.html</em></p>]]></content><author><name></name></author><category term="virtual-machines" /><category term="qemu" /><category term="sysadmin" /><summary type="html"><![CDATA[Connecting a VM using virt-viewer]]></summary></entry></feed>
