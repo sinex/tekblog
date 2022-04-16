@@ -1,0 +1,41 @@
+<!-- create a 'copy' button on all code snippets -->
+<script type="text/javascript">
+  function InitCopyPaste(){
+    const codeBlocks = document.querySelectorAll("div.highlighter-rouge");
+    codeBlocks.forEach((codeblock, index) => {
+      const code = codeBlocks[index].innerText;
+      const copyCodeButton = document.createElement("button");
+      copyCodeButton.innerHTML = "Copy";
+      copyCodeButton.classList = "btn btn-sm btn-outline-primary";
+      copyCodeButton.onclick = function () {
+        window.navigator.clipboard.writeText(code);
+        copyCodeButton.innerHTML = "Copied";
+        copyCodeButton.classList.add("btn-success");
+        copyCodeButton.classList.remove("btn-outline-primary");
+        setTimeout(() => {
+          copyCodeButton.innerHTML = "Copy";
+          copyCodeButton.classList.remove("btn-success");
+          copyCodeButton.classList.add("btn-outline-primary");
+        }, 2000);
+      };
+      codeblock.appendChild(copyCodeButton);
+    });
+  }
+  document.addEventListener("DOMContentLoaded", InitCopyPaste);
+</script>
+<style media="screen">
+  div.highlighter-rouge {
+    position: relative;
+  }
+  div.highlighter-rouge > .highlight {
+    padding-top: 10px;
+  }
+  div.highlighter-rouge button {
+    position: absolute;
+    top: 0px;
+    right: 2px;
+    background-color: #eef;
+    border: none;
+    cursor: pointer;
+  }
+</style>

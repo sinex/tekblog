@@ -1,0 +1,38 @@
+# Site settings
+# These are used to personalize your new site. If you look in the HTML files,
+# you will see them accessed via {{ site.title }}, {{ site.email }}, and so on.
+# You can create any custom variable you would like, and they will be accessible
+# in the templates via {{ site.myvariable }}.
+
+title: Tekblog
+email: 
+description: >-
+  Snippets from the world of IT & Software Engineering
+baseurl: "/jms/tekblog/pages" # the subpath of your site, e.g. /blog
+url: "" # the base hostname & protocol for your site, e.g. http://example.com
+twitter_username: 
+github_username:  
+
+# Build settings
+theme: minima
+plugins:
+  - jekyll-feed
+
+defaults:
+  -
+    scope:
+      path: "_posts"
+    values:
+      layout: "post"
+
+#destination: docs
+
+exclude:
+  - .sass-cache/
+  - .jekyll-cache/
+  - Gemfile
+  - Gemfile.lock
+  - vendor/bundle/
+  - vendor/cache/
+  - vendor/gems/
+  - vendor/ruby/
